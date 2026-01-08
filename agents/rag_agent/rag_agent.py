@@ -1,11 +1,23 @@
+"""
+RAG Agent for the Virtual HR system.
+Answers policy questions using document retrieval from Milvus and Claude for response generation.
+"""
 import os
 import glob
+import sys
 from typing import List, Optional
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+
+# Add parent path for imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import Milvus
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
+from anthropic import Anthropic
+from config import Config
+
 
 class RAGAgent:
     def __init__(self, 
@@ -19,15 +31,21 @@ class RAGAgent:
         self.collection_name = collection_name
         self.data_dir = data_dir
         
-        # Initialize Embeddings
-        # Verify OPENAI_API_KEY is set in environment
-        if not os.getenv("OPENAI_API_KEY"):
+        # Initialize Embeddings (still using OpenAI for embeddings)
+        if not Config.OPENAI_API_KEY:
             print("WARNING: OPENAI_API_KEY not found in environment variables.")
         
-        self.embeddings = OpenAIEmbeddings(model="text-embedding-3-large")
+        self.embeddings = OpenAIEmbeddings(
+            model=Config.OPENAI_EMBEDDING_MODEL,
+            api_key=Config.OPENAI_API_KEY
+        )
         
-        # Initialize LLM
-        self.llm = ChatOpenAI(temperature=1, model_name="gpt-5-mini-2025-08-07")
+        # Initialize Claude for response generation
+        if not Config.ANTHROPIC_API_KEY:
+            print("WARNING: ANTHROPIC_API_KEY not found in environment variables.")
+        
+        self.claude = Anthropic(api_key=Config.ANTHROPIC_API_KEY)
+        self.claude_model = Config.CLAUDE_MODEL
         
         # Initialize Vector Store (Lazy load or connect)
         self.vector_store = self._init_vector_store()
@@ -36,38 +54,12 @@ class RAGAgent:
         """
         Connects to Milvus. If collection exists, loads it.
         If not, loads documents, splits them, and creates the collection.
-        This provides a basic check. For production, more robust migration logic is needed.
         """
-        # Check if we should re-index or just connect
-        # For simplicity, we'll assume if we can connect and search, it's good.
-        # But here we probably want to ensure data is loaded at least once.
-        
-        # Note: Langchain's Milvus wrapper handles connection internally upon instantiation
-        # based on connection_args.
-        
-        # Strategy: Try to connect to an existing collection. 
-        # If it's empty or doesn't exist, index the data.
-        
-        # We really need to know if we've indexed.
-        # For this agent, we'll try to load and if the collection seems new, we ingest.
-        # A simple way with LangChain is just to use `from_documents` if we are initializing,
-        # or just the constructor if we are connecting.
-        
-        # Since checking existence efficiently via Langchain wrapper is tricky without
-        # direct pymilvus usage, we will try to connect. 
-        
         vector_store = Milvus(
             embedding_function=self.embeddings,
             collection_name=self.collection_name,
             connection_args={"host": self.milvus_host, "port": self.milvus_port}
         )
-        
-        # Check if collection is empty (simplified check)
-        # In a real scenario, we might want persistent state or a check file.
-        # Here, let's just create a method `ingest_data` that the user calls manually 
-        # or we call if we detect 0 docs (if possible). 
-        # For now, let's just return the store and rely on explicit ingestion or 
-        # check if we can simply "add" if empty.
         
         return vector_store
 
@@ -106,50 +98,54 @@ class RAGAgent:
             batch = chunks[i:i + batch_size]
             print(f"Indexing batch {i // batch_size + 1}/{(len(chunks) + batch_size - 1) // batch_size}...")
             self.vector_store.add_documents(batch)
-            time.sleep(2) # Sleep to respect rate limits
+            time.sleep(2)  # Sleep to respect rate limits
             
         print("Ingestion complete.")
 
     def query(self, user_query: str) -> str:
         """
-        Retrieves relevant documents and generates a response.
+        Retrieves relevant documents and generates a response using Claude.
         """
         print(f"Querying: {user_query}")
         
-        # Retrieve
+        # Retrieve relevant documents
         docs = self.vector_store.similarity_search(user_query, k=3)
         
         if not docs:
             return "I couldn't find any relevant information in the policy documents."
             
-        # Context
+        # Build context from retrieved documents
         context = "\n\n".join([d.page_content for d in docs])
         
-        # Generate
-        # Simple prompt construction
+        # Generate response using Claude
         prompt = f"""You are an HR Policy Assistant. Use the following context to answer the user's question.
-If the answer is not in the context, just say you don't know in a polite manner. Do not disclose your sources
+If the answer is not in the context, just say you don't know in a polite manner. Do not disclose your sources.
 
 Context:
 {context}
 
-Question: {user_query}
+Question: {user_query}"""
 
-Answer:"""
+        response = self.claude.messages.create(
+            model=self.claude_model,
+            max_tokens=1024,
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+        
+        return response.content[0].text
 
-        response = self.llm.invoke(prompt)
-        return response.content
 
 # Example usage (if run directly)
 if __name__ == "__main__":
-    # Ensure env vars are set or load .env
     from dotenv import load_dotenv
     load_dotenv()
     
     agent = RAGAgent(milvus_host="localhost", milvus_port="19530", data_dir="./data")
     
     # Uncomment to ingest data (run once)
-    # agent.ingest_data()
+    agent.ingest_data()
     
     # Test query
     # print(agent.query("What is the policy for annual leave?"))

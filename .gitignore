@@ -209,3 +209,6 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 .venv/
+
+# Google Sheets credentials (sensitive)
+credentials.json
