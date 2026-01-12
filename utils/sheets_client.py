@@ -254,39 +254,63 @@ class LeaveTrackerSheet:
     
     def update_leave_status(
         self, 
-        employee_id: str, 
-        status: str, 
-        reason: str,
-        start_date: Optional[str] = None
+        employee_id: Optional[str] = None, 
+        status: str = "",
+        reason: str = "",
+        start_date: Optional[str] = None,
+        employee_name: Optional[str] = None
     ) -> dict:
         """
         Update the status of a leave request.
         
         Args:
-            employee_id: The employee's ID
+            employee_id: The employee's ID (optional if employee_name is provided)
             status: New status (Approved/Rejected)
             reason: Reason for approval/rejection
             start_date: Optional - to identify specific leave if multiple pending
+            employee_name: The employee's name (optional, used if employee_id not provided)
             
         Returns:
             Updated leave record or error info
         """
+        if not employee_id and not employee_name:
+            return {"error": "Either employee_id or employee_name must be provided"}
+        
         worksheet = self.client.get_worksheet(self.sheet_id)
         all_values = worksheet.get_all_values()
         
         # Find pending leave for this employee
         found_row = None
+        matched_employee_id = None
+        matched_employee_name = None
+        
         for i, row in enumerate(all_values[1:], start=2):  # Skip header, 1-indexed
-            if (str(row[self.COL_EMPLOYEE_ID - 1]) == str(employee_id) and 
-                row[self.COL_STATUS - 1] == "Pending"):
+            row_employee_id = str(row[self.COL_EMPLOYEE_ID - 1])
+            row_employee_name = str(row[self.COL_EMPLOYEE_NAME - 1]).lower()
+            
+            # Match by employee_id if provided, otherwise by employee_name
+            if employee_id:
+                id_match = row_employee_id == str(employee_id)
+            else:
+                id_match = False
+            
+            if employee_name:
+                name_match = row_employee_name == employee_name.lower()
+            else:
+                name_match = False
+            
+            if (id_match or name_match) and row[self.COL_STATUS - 1] == "Pending":
                 # If start_date specified, match it
                 if start_date and row[self.COL_START_DATE - 1] != start_date:
                     continue
                 found_row = i
+                matched_employee_id = row_employee_id
+                matched_employee_name = str(row[self.COL_EMPLOYEE_NAME - 1])
                 break
         
+        identifier = employee_id if employee_id else employee_name
         if not found_row:
-            return {"error": f"No pending leave found for employee {employee_id}"}
+            return {"error": f"No pending leave found for employee {identifier}"}
         
         # Update status
         worksheet.update_cell(found_row, self.COL_STATUS, status)
@@ -299,7 +323,8 @@ class LeaveTrackerSheet:
         worksheet.update_cell(found_row, self.COL_COMMENTS, new_comment)
         
         return {
-            "employee_id": employee_id,
+            "employee_id": matched_employee_id,
+            "employee_name": matched_employee_name,
             "status": status,
             "reason": reason,
             "updated": True
