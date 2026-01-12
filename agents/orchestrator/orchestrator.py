@@ -4,6 +4,7 @@ Uses OpenAI function calling to intelligently route requests to specialized sub-
 """
 import os
 import sys
+from datetime import datetime
 from typing import Dict, Any, Optional, List
 import json
 
@@ -243,12 +244,19 @@ class OrchestratorAgent:
         Returns:
             Dict with 'function' name and 'arguments', or 'content' for direct response
         """
+        # Get current system date for accurate date handling
+        current_date = datetime.now()
+        current_date_str = current_date.strftime("%Y-%m-%d")
+        current_day_name = current_date.strftime("%A")
+        
         # Build messages with conversation history for context
         messages = [
             {
                 "role": "system",
-                "content": """You are a helpful HR assistant. Analyze the user's message and 
+                "content": f"""You are a helpful HR assistant. Analyze the user's message and 
 determine which function to call. Consider the conversation context when making decisions.
+
+IMPORTANT: Today's date is {current_date_str} ({current_day_name}). Use this for all date calculations.
 
 Key routing guidelines:
 - Policy questions (what is, how does, explain) → handle_policy_question
@@ -256,9 +264,10 @@ Key routing guidelines:
 - Feedback submission, trends → handle_feedback
 - Greetings, general chat → handle_general_query
 
-Extract all relevant parameters from the user's message. For dates, convert 
-relative dates like 'tomorrow' or 'next Monday' to YYYY-MM-DD format 
-(today is the current date based on the system)."""
+Extract all relevant parameters from the user's message. For dates:
+- Convert relative dates like 'tomorrow' or 'next Monday' to YYYY-MM-DD format
+- If no start_date is mentioned for leave, default to today: {current_date_str}
+- If no end_date is mentioned for leave, default to the start_date"""
             }
         ]
         
@@ -336,22 +345,49 @@ relative dates like 'tomorrow' or 'next Monday' to YYYY-MM-DD format
         """Route to Leave agent for leave management."""
         
         # Build context for leave agent
-        context = {
-            "action": arguments.get("action", ""),
-            "employee_id": arguments.get("employee_id") or user_context.get("employee_id"),
-            "employee_name": arguments.get("employee_name") or user_context.get("employee_name"),
-            "is_hr": user_context.get("is_hr", False),
-            "extracted_params": {
-                "leave_type": arguments.get("leave_type", "Annual"),
-                "start_date": arguments.get("start_date"),
-                "end_date": arguments.get("end_date"),
-                "num_days": arguments.get("num_days"),
-                "reason": arguments.get("reason"),
-                "status": arguments.get("status"),
-                "approval_reason": arguments.get("reason"),
-                "employee_id": arguments.get("employee_id") or user_context.get("employee_id"),
+        action = arguments.get("action", "")
+        
+        # For update_status (approval/rejection), do NOT use the logged-in user's employee_id/name
+        # as fallback because we need the TARGET employee's info, not the HR person's
+        if action == "update_status":
+            context = {
+                "action": action,
+                "employee_id": None,  # Don't pass HR person's ID here
+                "employee_name": None,  # Don't pass HR person's name here
+                "is_hr": user_context.get("is_hr", False),
+                "extracted_params": {
+                    "leave_type": arguments.get("leave_type", "Annual"),
+                    "start_date": arguments.get("start_date"),
+                    "end_date": arguments.get("end_date"),
+                    "num_days": arguments.get("num_days"),
+                    "reason": arguments.get("reason"),
+                    "status": arguments.get("status"),
+                    "approval_reason": arguments.get("reason"),
+                    # These should be the TARGET employee, extracted from the message
+                    "employee_id": arguments.get("employee_id"),
+                    "employee_name": arguments.get("employee_name"),
+                }
             }
-        }
+        else:
+            # For other actions (submit_leave, check_balance, view_history),
+            # fall back to logged-in user's info if not specified
+            context = {
+                "action": action,
+                "employee_id": arguments.get("employee_id") or user_context.get("employee_id"),
+                "employee_name": arguments.get("employee_name") or user_context.get("employee_name"),
+                "is_hr": user_context.get("is_hr", False),
+                "extracted_params": {
+                    "leave_type": arguments.get("leave_type", "Annual"),
+                    "start_date": arguments.get("start_date"),
+                    "end_date": arguments.get("end_date"),
+                    "num_days": arguments.get("num_days"),
+                    "reason": arguments.get("reason"),
+                    "status": arguments.get("status"),
+                    "approval_reason": arguments.get("reason"),
+                    "employee_id": arguments.get("employee_id") or user_context.get("employee_id"),
+                    "employee_name": arguments.get("employee_name") or user_context.get("employee_name"),
+                }
+            }
         
         try:
             response = self.leave_agent.handle(original_message, context)

@@ -85,31 +85,50 @@ class LeaveTrackerAgent(BaseAgent):
     def _understand_intent(self, query: str) -> tuple[str, dict]:
         """Use LLM to understand the user's intent and extract parameters."""
         
-        system_prompt = """You are a leave management assistant. Analyze the user's query and extract:
+        # Get current system date for relative date calculations
+        current_date = datetime.now()
+        current_date_str = current_date.strftime("%Y-%m-%d")
+        current_day_name = current_date.strftime("%A")
+        
+        system_prompt = f"""You are a leave management assistant. Analyze the user's query and extract:
 1. The action they want to perform
 2. Any relevant parameters
 
+IMPORTANT: Today's date is {current_date_str} ({current_day_name}). 
+- Use this to convert any relative dates (like "tomorrow", "next week", "next Monday", "in 3 days", etc.) to actual dates in YYYY-MM-DD format.
+- If no start_date is mentioned for a leave request, default to today's date: {current_date_str}
+- If no end_date is mentioned for a leave request, default to the start_date
+
+CRITICAL FOR update_status (approval/rejection):
+- The employee_id and employee_name fields should be the TARGET EMPLOYEE whose leave is being approved or rejected
+- This is NOT the person doing the approval (the HR person), but the person whose leave request is being processed
+- Extract the target employee's ID or name from phrases like "approve leave for [name/ID]", "reject [name]'s leave", etc.
+
 Respond with JSON only:
-{
+{{
     "action": "submit_leave" | "check_balance" | "view_history" | "update_status",
-    "params": {
-        "employee_id": "string or null",
-        "employee_name": "string or null",
+    "params": {{
+        "employee_id": "string or null (for update_status: the TARGET employee's ID whose leave is being approved/rejected)",
+        "employee_name": "string or null (for update_status: the TARGET employee's name whose leave is being approved/rejected)",
         "leave_type": "Annual|Sick|Personal|Maternity|Paternity|Marriage|Bereavement or null",
-        "start_date": "YYYY-MM-DD or null",
-        "end_date": "YYYY-MM-DD or null",
+        "start_date": "YYYY-MM-DD (default to {current_date_str} if not specified)",
+        "end_date": "YYYY-MM-DD (default to start_date if not specified)",
         "num_days": "number or null",
         "reason": "string or null",
         "status": "Approved|Rejected or null (for update_status)",
         "approval_reason": "string or null (reason for approval/rejection)"
-    }
-}
+    }}
+}}
 
-Examples:
-- "I want to take 2 days off next week" -> action: submit_leave
+Examples (assuming today is {current_date_str}):
+- "I want to take 2 days off starting tomorrow" -> action: submit_leave, start_date: (tomorrow's date)
+- "I want to take leave next Monday" -> action: submit_leave, start_date: (next Monday's date)
+- "I want sick leave" -> action: submit_leave, start_date: {current_date_str}, end_date: {current_date_str}
 - "How many leaves do I have left?" -> action: check_balance
 - "Show my leave history" -> action: view_history
-- "Approve leave for employee 123 due to medical emergency" -> action: update_status
+- "Approve leave for employee 123 due to medical emergency" -> action: update_status, employee_id: "123", status: "Approved"
+- "Approve John Doe's leave. Reason: approved as per policy" -> action: update_status, employee_name: "John Doe", status: "Approved"
+- "Reject leave for Sarah Smith because of project deadline" -> action: update_status, employee_name: "Sarah Smith", status: "Rejected"
 """
         
         response = self.client.chat.completions.create(
@@ -149,13 +168,12 @@ Examples:
         num_days = params.get("num_days")
         reason = params.get("reason", "")
         
-        # Validate dates
+        # Default to current system date if not provided
+        current_date = datetime.now().strftime("%Y-%m-%d")
         if not start_date:
-            return self._create_response(
-                success=False,
-                message="Please specify when you'd like to start your leave. "
-                       "For example: 'I want leave from 2026-01-15 to 2026-01-17'"
-            )
+            start_date = current_date
+        if not end_date:
+            end_date = current_date
         
         # Calculate end_date if only num_days provided
         if not end_date and num_days:
@@ -315,15 +333,17 @@ Examples:
             )
         
         employee_id = params.get("employee_id")
+        employee_name = params.get("employee_name")
         status = params.get("status")
         approval_reason = params.get("approval_reason") or params.get("reason")
         start_date = params.get("start_date")
         
-        if not employee_id:
+        if not employee_id and not employee_name:
             return self._create_response(
                 success=False,
-                message="Please specify the employee ID for the leave to update. "
-                       "Example: 'Approve leave for employee 123. Reason: Medical emergency'"
+                message="Please specify the employee ID or employee name for the leave to update. "
+                       "Example: 'Approve leave for employee 123. Reason: Medical emergency' "
+                       "or 'Approve leave for John Doe. Reason: Medical emergency'"
             )
         
         if not status or status not in ["Approved", "Rejected"]:
@@ -342,10 +362,11 @@ Examples:
         
         try:
             result = self.leave_sheet.update_leave_status(
-                employee_id=str(employee_id),
+                employee_id=str(employee_id) if employee_id else None,
                 status=status,
                 reason=approval_reason,
-                start_date=start_date
+                start_date=start_date,
+                employee_name=employee_name
             )
             
             if result.get("error"):
@@ -354,10 +375,13 @@ Examples:
                     message=result["error"]
                 )
             
+            # Get employee identifier for message
+            emp_display = f"{result.get('employee_name', '')} (ID: {result.get('employee_id', '')})"
+            
             status_emoji = "✅" if status == "Approved" else "❌"
             return self._create_response(
                 success=True,
-                message=f"{status_emoji} Leave for employee {employee_id} has been **{status}**.\n\n"
+                message=f"{status_emoji} Leave for {emp_display} has been **{status}**.\n\n"
                        f"📝 Reason: {approval_reason}",
                 data=result
             )
